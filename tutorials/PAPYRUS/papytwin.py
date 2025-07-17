@@ -3,92 +3,84 @@
 Created on Tue Mar 07 10:40:42 2023
 
 Accurate version of PAPYRUS AO System used for reproducing the real system in details.
+- 17/06/2025: Update after change of the WFS camera.
+- 23/06/2025: Update to prepare the integration with DAO
 
 @author: cheritie - astriffl
 """
-from pymatreader import read_mat 
 import time
 import matplotlib.pyplot as plt
 import numpy as np
-import os
 from OOPAO.calibration.CalibrationVault import CalibrationVault
 from OOPAO.calibration.InteractionMatrix import InteractionMatrix
-from OOPAO.tools.displayTools import cl_plot, displayMap, display_wfs_signals
-from compute_papytwin import compute_papyrus_model,optimize_pwfs_pupils, bin_bench_data
+from OOPAO.tools.displayTools import cl_plot, displayMap
+from Papyrus import Papyrus
 
-#% -----------------------     read parameter file   ----------------------------------
+#%% Compute the OOPAO Objects
 
-from parameter_files.parameterFile_papytwin import initializeParameterFile
-param = initializeParameterFile()
+Papytwin = Papyrus()
+# telescope object
+tel     = Papytwin.tel
+# source object
+ngs     = Papytwin.ngs
+# deformable mirror object
+dm      = Papytwin.dm
+# Pyramid WFS object
+wfs     = Papytwin.wfs
+# atmosphere object
+atm     = Papytwin.atm
+# slow Tip/Tilt object
+slow_tt = Papytwin.slow_tt
+# parameter file
+param   = Papytwin.param
 
-# ratio of number of subaperture (1 == real scale simulation)
-param['ratio'] = 1
-# BE SUR TO SET CONSOLE TO WORKING DIRECTORY BEFORE RUNNING
-directory = os.getcwd().replace("\\", "/")
+#%% Function to swith to on-sky pupil (possibility to add an offset for the position of the pupil)
+Papytwin.set_pupil(calibration=False,
+                   sky_offset=[2,2])
 
-# location of the relevant data (WFS pupil mask, KL basis, measured iMat, T152 pupil, ... )
-loc = directory + '/papyrus_inputs/'
+ngs*tel*wfs
 
-# tel_calib,_,dm_calib,_,_ = compute_papyrus_model(param = param, loc = loc, source=False, IFreal=IFreal)
-tel,ngs,dm,wfs,atm = compute_papyrus_model(param = param, loc = loc, source=True, IFreal=False)
+plt.figure()
+plt.imshow(tel.pupil)
+plt.figure()
+plt.imshow(wfs.cam.frame)
 
-ngs*tel*dm*wfs
+# set back to calibration pupil
+Papytwin.set_pupil(calibration=True)
+ngs*tel*wfs
 
-atm.initializeAtmosphere(tel)
 
-#%%
-from OOPAO.tools.tools import read_fits
+#%% PAPYRUS input data from the bench
+from pymatreader import read_mat
 
-M2C = np.load('M2C.npy')
+M2C = read_mat('M2C_KL_OOPAO_synthetic_IF.mat')['M2C_KL']
 
-valid_pixel = np.load('valid_pixel.npy')
+valid_pixel = read_mat('useful_pixels_20250604_0305.mat')['usefulPix']
 
-# only extract of full experimental int-mat -- full matrix avalaible upon request
-
-int_mat_extract = np.load('int_mat_1_5_10_20_30_50_80_100_150.npy')
+im = read_mat('intMat_klOOPAO_synthetic_bin=1_F=500_rMod=5_20250604_0307.mat')['matrix_inf']
 
 # index of the KL modes included in the int-mat
 ind = [1, 5, 10, 20, 30, 50, 80, 100, 150]
 
-valid_pixel, int_mat_binned = bin_bench_data(valid_pixel = valid_pixel, full_int_mat = int_mat_extract, ratio = param['ratio'])
+int_mat_extract= im[:,ind]
 
-#%% SET WFS PUPILS
+valid_pixel, int_mat_binned = Papytwin.bin_bench_data(valid_pixel = valid_pixel, full_int_mat = im, ratio = param['ratio'])
 
-from OOPAO.tools.displayTools import interactive_show
-from OOPAO.Pyramid import Pyramid
+#%% PAPYRUS/PAPYTWIN Pyramid Pupils Comparison 
 
-   
-optimize_pwfs_pupils(wfs = wfs ,valid_pixel_map = valid_pixel)
-    
-#%%
-from parameter_files.OCAM2K  import OCAM_param
-from OOPAO.Detector import Detector
+var_im = np.var(im,axis=1).reshape(240,240)
+var_im/=var_im.max()
+var_im = var_im>0.005
 
-OCAM = Detector(nRes            = wfs.cam.resolution,
-                integrationTime = tel.samplingTime,
-                bits            = None,
-                FWC             = None,
-                gain            = 1,
-                sensor          = OCAM_param['sensor'],
-                QE              = 1,
-                binning         = 1,
-                psf_sampling    = wfs.zeroPaddingFactor,
-                darkCurrent     = 0,
-                readoutNoise    = 0,
-                photonNoise     = False)
+# in case there is a mis-match set the key-word "correct" to True
+correct = False
+Papytwin.check_pwfs_pupils(valid_pixel_map = var_im, correct=correct)
 
 
-wfs.cam = OCAM
-ngs*tel*wfs
+#%% PAPYRUS/PAPYTWIN Interaction Matrix Comparison 
 
-
-#%%
-# dm.modes = dm.modes /alpao_unit
 M2C_CL      = M2C[:,ind]
-
-
 wfs.modulation = 5
-
 stroke = 0.0001
 calib = InteractionMatrix(  ngs            = ngs,\
                             atm            = atm,\
@@ -102,66 +94,102 @@ calib = InteractionMatrix(  ngs            = ngs,\
                             noise          = 'off',
                             print_time=False,
                             display=True)
-    
 
-#%%
-
-displayMap(int_mat_extract, norma = True,axis=1)
+a = displayMap(int_mat_extract, norma = True,axis=1,returnOutput=True)
 plt.title("Experimental Interaction Matrix")
-displayMap(calib.D, norma = True,axis=1)
+b = displayMap(calib.D[:,:], norma = True,axis=1,returnOutput=True)
 plt.title("Synthetic Interaction Matrix")
 
+a[np.isinf(a)] = 0
+b[np.isinf(b)] = 0
 
-#%%  -----------------------     Close loop  ----------------------------------
-tel.resetOPD()
-M2C_CL      = M2C.copy()
+from OOPAO.tools.displayTools import interactive_show
+interactive_show(a,b) # use right and left click to switch between PAPYRUS and PAPYTWIN
+
+
+#%% PAPYRUS KL Basis Computation (only for the bench)
+compute_kl_basis = False
+
+if compute_kl_basis:
+    from OOPAO.calibration.compute_KL_modal_basis import compute_KL_basis
+    M2C = compute_KL_basis(tel = tel,
+                           atm = atm,
+                           dm  = dm,
+                           lim = 1e-3)
+
+#%% PAPYRUS/PAPYTWIN DM/WFS Mis-registration calibration
+
+# Slow if index_modes is long
+index_modes = np.arange(10,150,50)
+calibrate_mis_registration = False
+if calibrate_mis_registration:
+    Papytwin.calibrate_mis_registration(M2C = M2C,
+                           input_im = int_mat_binned,
+                           index_modes = index_modes)
+
+
+#%% PAPYTWIN Full Interaction Matrix Computation
 
 wfs.modulation = 5
 
 stroke = 0.0001
-calib = InteractionMatrix(  ngs            = ngs,\
-                            atm            = atm,\
-                            tel            = tel,\
-                            dm             = dm,\
-                            wfs            = wfs,\
-                            M2C            = M2C_CL,\
-                            stroke         = stroke,\
+calib = InteractionMatrix(  ngs            = ngs,
+                            atm            = atm,
+                            tel            = tel,
+                            dm             = dm,
+                            wfs            = wfs,
+                            M2C            = M2C,
+                            stroke         = stroke,
                             phaseOffset    = 0,\
                             nMeasurements  = 1,\
                             noise          = 'off',
-                            print_time=False,
-                            display=True)
+                            print_time     = False,
+                            display        = True)
+    
+
+a = displayMap(im[:,index_modes], norma = True,axis=1,returnOutput=True)
+plt.title("Experimental Interaction Matrix")
+b = displayMap(calib.D[:,index_modes], norma = True,axis=1,returnOutput=True)
+plt.title("Synthetic Interaction Matrix")
+
+a[np.isinf(a)] = 0
+b[np.isinf(b)] = 0
+
+from OOPAO.tools.displayTools import interactive_show
+interactive_show(a,b)
+
+plt.figure()
+plt.plot(np.std(im,axis=0),label='PAPYRUS')
+plt.plot(np.std(calib.D,axis=0),label='PAPYTWIN')
+plt.legend()
+plt.xlabel('KL Mode Index')
+plt.ylabel('Int. Mat STD')
+
 #%%  -----------------------     Close loop  ----------------------------------
 tel.resetOPD()
 
 end_mode    = 195 
+M2C_CL = M2C[:,:end_mode]
 # These are the calibration data used to close the loop
 # use of experimental calibration
 # if full int-mat is available only
-#calib_CL    = CalibrationVault(int_mat_binned[:,:end_mode])
-
-# use of synthetic calibration
-
-calib_CL    = CalibrationVault(calib.D[:,:end_mode])
+calib_CL    = CalibrationVault(im[:,:end_mode])
 
 #%%
 
 from OOPAO.Atmosphere import Atmosphere
 
-
-atm = Atmosphere(telescope = tel, 
-                 r0 =0.6,
-                 L0=25, 
-                 windSpeed = [2], 
-                 fractionalR0 = [1], 
-                 windDirection = [0],
-                 altitude = [0])
+atm = Atmosphere(telescope      = tel, 
+                 r0             = 0.06,
+                 L0             = 25, 
+                 windSpeed      = [0.01], 
+                 fractionalR0   = [1], 
+                 windDirection  = [0],
+                 altitude       = [0])
 
 atm.initializeAtmosphere(tel)
 
 
-
-#%%
 from OOPAO.Detector import Detector
 from OOPAO.Source import Source
 
@@ -189,14 +217,12 @@ dm.coefs=0
 ngs*tel*dm*wfs
 wfs*wfs.focal_plane_camera
 # Update the r0 parameter, generate a new phase screen for the atmosphere and combine it with the Telescope
-atm.r0 = 0.1
 atm.generateNewPhaseScreen(seed = 10)
 tel+atm
 
 tel.computePSF(4)
 plt.close('all')
     
-
 
 # combine telescope with atmosphere
 tel+atm
@@ -248,7 +274,7 @@ plot_obj = cl_plot(list_fig          = [atm.OPD,
                     list_ratio        = [[0.95,0.95,0.1],[1,1,1,1]], s=20)
 
 # loop parameters
-gainCL                  = 0.3
+gainCL                  = 0.5
 wfs.cam.photonNoise     = False
 display                 = True
 frame_delay             = 2
@@ -256,15 +282,13 @@ reconstructor = M2C_CL@calib_CL.M
 
 for i in range(nLoop):
     a=time.time()
-    # update phase screens => overwrite tel.OPD and consequently tel.src.phase
-    # atm.update()
     
+    # update phase screens => overwrite tel.OPD and consequently tel.src.phase  
     atm.update()
-    
     # save phase variance
     total[i]=np.std(tel.OPD[np.where(tel.pupil>0)])*1e9
     # propagate light from the NGS through the atmosphere, telescope, DM to the WFS and NGS camera with the CL commands applied
-    atm*ngs*tel*dm*wfs*ngs_cam
+    atm*ngs*tel*dm*slow_tt*wfs*ngs_cam
     wfs*wfs.focal_plane_camera
     # save residuals corresponding to the NGS
     residual_NGS[i] = np.std(tel.OPD[np.where(tel.pupil>0)])*1e9
@@ -274,7 +298,7 @@ for i in range(nLoop):
         NGS_PSF = np.log10(np.abs(ngs_cam.frame))
     
     # propagate light from the SRC through the atmosphere, telescope, DM to the Instrument camera
-    atm*src*tel*dm*src_cam
+    atm*src*tel*dm*slow_tt*src_cam
     dm_commands[i,:] = dm.coefs.copy()
     # save residuals corresponding to the NGS
     residual_SRC[i] = np.std(tel.OPD[np.where(tel.pupil>0)])*1e9
@@ -313,29 +337,3 @@ for i in range(nLoop):
         if plot_obj.keep_going is False:
             break
     print('Loop'+str(i)+'/'+str(nLoop)+' NGS: '+str(residual_NGS[i])+' -- SRC:' +str(residual_SRC[i])+ '\n')
-
-
-#%%
-
-
-delta = (dm_commands[21:,:] - dm_commands[20:-1,:])[:80,:]
-delta_20 = (dm_commands_20[21:,:] - dm_commands_20[20:-1,:])[:80,:]
-delta_10 = (dm_commands_10[21:,:] - dm_commands_10[20:-1,:])[:80,:]
-
-
-
-
-plt.figure()
-plt.subplot(131)
-plt.imshow(delta@delta.T)
-plt.title('Windspeed 30 m/s')
-
-plt.subplot(132)
-plt.imshow(delta_20@delta_20.T)
-plt.title('Windspeed 20 m/s')
-
-
-plt.subplot(133)
-plt.imshow(delta_10@delta_10.T)
-plt.title('Windspeed 10 m/s')
-

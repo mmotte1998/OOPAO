@@ -86,7 +86,7 @@ class ShackHartmann:
                 sampling of the detector pixels in [arcsec]. This parameter overwrites the shannon_sampling parameter.
                 The effective pixel_scale value is obtained by taking the closest value after considering the FFT sampling
                 and the possible binning factor:
-                    - If the pixel-scale is too large for the lenslet FoV, the diffractive spots are zero-padded. 
+                    - If the pixel-scale is too large for the lenslet FoV, the diffractive spots are zero-padded.
                     A warning is displayed in this situation.
         padding_extension_factor : int, optional
             DEPRECATED
@@ -403,7 +403,7 @@ class ShackHartmann:
             * self.pixel_scale / (self.telescope.src.wavelength / self.telescope.D) / self.rad2arcsec
         self.wfs_measure(self.telescope.src.phase)
         self.slopes_units = np.mean(self.signal)
-        self.cam.photonNoise =  photonNoise
+        self.cam.photonNoise = photonNoise
         self.cam.readoutNoise = readoutNoise
         self.telescope.OPD = tmp_opd
         print('Done')
@@ -467,18 +467,36 @@ class ShackHartmann:
                           ind_x*self.n_pix_subap//self.binning_factor:(ind_x+1)*self.n_pix_subap//self.binning_factor,
                           ind_y*self.n_pix_subap//self.binning_factor:(ind_y+1)*self.n_pix_subap//self.binning_factor] = intensity
 
-    def split_raw_data(self):
-        raw_data_h_split = np.vsplit((self.cam.frame), self.nSubap)
-        self.maps_intensity = np.zeros([self.nSubap**2,
+    def merge_data_cube(self, cube):
+        # save current raw data
+        tmp_raw_data = self.raw_data.copy()
+
+        def joblib_fill_raw_data():
+            Q = Parallel(n_jobs=1, prefer='processes')(delayed(self.fill_raw_data)(i, j, k) for i, j, k in zip(self.index_x[self.valid_subapertures_1D],
+                                                                                                               self.index_y[self.valid_subapertures_1D],
+                                                                                                               cube))
+            return Q
+        joblib_fill_raw_data()
+        output_raw_data = self.raw_data.copy()
+        # re-assign raw_data
+        self.raw_data = tmp_raw_data.copy()
+        return output_raw_data
+
+    def split_raw_data(self,input_frame=None):
+        if input_frame is None:
+            input_frame = self.cam.frame
+        raw_data_h_split = np.vsplit((input_frame), self.nSubap)
+        maps_intensity = np.zeros([self.nSubap**2,
                                         self.n_pix_subap,
                                         self.n_pix_subap], dtype=float)
         center = self.n_pix_subap//2
         for i in range(self.nSubap):
             raw_data_v_split = np.hsplit(raw_data_h_split[i], self.nSubap)
-            self.maps_intensity[i*self.nSubap:(i+1)*self.nSubap,
+            maps_intensity[i*self.nSubap:(i+1)*self.nSubap,
                                 center - self.n_pix_subap//self.binning_factor//2:center+self.n_pix_subap//self.binning_factor // 2,
                                 center - self.n_pix_subap//self.binning_factor//2:center+self.n_pix_subap//self.binning_factor//2] = np.asarray(raw_data_v_split)
-        self.maps_intensity = self.maps_intensity[self.valid_subapertures_1D, :, :]
+        maps_intensity = maps_intensity[self.valid_subapertures_1D, :, :]
+        return maps_intensity
 
     def compute_raw_data_multi(self, intensity):
         self.ind_frame = np.zeros(intensity.shape[0], dtype=(int))
@@ -556,7 +574,7 @@ class ShackHartmann:
         if len(tmp) > 1:
             tmp = tmp[0]
         x_max = x_subap[tmp[0]]
-        y_max = y_subap[tmp[1]]
+        y_max = y_subap[tmp[0]]
         shift_X = np.zeros(len(self.telescope.src.Na_profile[0, :]))
         shift_Y = np.zeros(len(self.telescope.src.Na_profile[0, :]))
         for i in range(len(self.telescope.src.Na_profile[0, :])):
@@ -644,7 +662,7 @@ class ShackHartmann:
     def wfs_integrate(self):
         # propagate to detector to add noise and detector effects
         self*self.cam
-        self.split_raw_data()
+        self.maps_intensity = self.split_raw_data()
 
         # compute the centroid on valid subaperture
         self.centroid_lenslets = self.centroid(self.maps_intensity*self.weighting_map, self.threshold_cog)
