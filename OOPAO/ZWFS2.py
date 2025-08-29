@@ -27,6 +27,7 @@ class ZWFS2:
             phase_shift = [-phase_shift,phase_shift]
         self.zwfs1 = ZWFS(tel, diameter=diameter, phase_shift = phase_shift[0], transmittance=flux_ratio*transmittance, zpf = zpf, phase_shift_unit=phase_shift_unit, propagation_method=propagation_method)
         self.zwfs2 = ZWFS(tel, diameter=diameter, phase_shift = phase_shift[1], transmittance=(1-flux_ratio)*transmittance, zpf = zpf, phase_shift_unit=phase_shift_unit, propagation_method=propagation_method)
+        
         # self.zwfs1.beta_ref = self.zwfs1.beta
         # self.zwfs1.Ib_ref = self.zwfs1.Ib
         # self.zwfs2.beta_ref = self.zwfs2.beta

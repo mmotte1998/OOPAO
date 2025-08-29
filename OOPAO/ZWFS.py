@@ -86,8 +86,8 @@ class ZWFS:
         
         if diameter <=0:
             warnings.warn(f'{diameter} is not a possible diameter, using d=1.06 instead')
-            self.diameter = 1.06
-                
+            
+        self.diameter = diameter
         self.radius = self.diameter/2
         if phase_shift_unit == 'lambda':
             self.phase_shift = phase_shift*2*np.pi()
