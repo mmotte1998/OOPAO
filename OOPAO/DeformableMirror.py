@@ -17,7 +17,7 @@ except ImportError or ModuleNotFoundError:
 from joblib import Parallel, delayed
 from .MisRegistration import MisRegistration
 from .tools.interpolateGeometricalTransformation import interpolate_cube
-from .tools.tools import emptyClass, pol2cart, print_, OopaoError, warning
+from .tools.tools import emptyClass, pol2cart, print_, OopaoError
 
 
 class DeformableMirror:
@@ -27,6 +27,7 @@ class DeformableMirror:
                  mechCoupling: float = 0.35,
                  coordinates: np.ndarray = None,
                  pitch: float = None,
+                 valid_act: bool = False,
                  modes: np.ndarray = None,
                  misReg=None,
                  M4_param=None,
@@ -300,22 +301,34 @@ class DeformableMirror:
             # In that case corresponds to the number of actuator along the diameter
             self.nAct = nSubap+1
             self.nActAlongDiameter = self.nAct-1
+            if valid_act:
+                grid=np.mgrid[0:self.nAct,0:self.nAct]
+                rgrid=np.sqrt((grid[0]-self.nAct/2+0.5)**2+(grid[1]-self.nAct/2+0.5)**2)
+                x = np.linspace(-(self.D)/2, (self.D)/2, self.nAct)
+                X, Y = np.meshgrid(x, x)
 
+                self.xIF0 = np.reshape(X, [self.nAct**2])
+                self.yIF0 = np.reshape(Y, [self.nAct**2])
+                self.validAct = np.zeros((self.nAct,self.nAct)).astype(bool)
+                self.validAct[np.where(rgrid<self.nAct/2)]=1
+                self.validAct = self.validAct.ravel()
+            
+            else:
             # set the coordinates of the DM object to produce a cartesian geometry
-            x = np.linspace(-(self.D)/2, (self.D)/2, self.nAct)
-            X, Y = np.meshgrid(x, x)
+                x = np.linspace(-(self.D)/2, (self.D)/2, self.nAct)
+                X, Y = np.meshgrid(x, x)
 
-            # compute the initial set of coordinates
-            self.xIF0 = np.reshape(X, [self.nAct**2])
-            self.yIF0 = np.reshape(Y, [self.nAct**2])
+                # compute the initial set of coordinates
+                self.xIF0 = np.reshape(X, [self.nAct**2])
+                self.yIF0 = np.reshape(Y, [self.nAct**2])
 
-            # select valid actuators (central and outer obstruction)
-            r = np.sqrt(self.xIF0**2 + self.yIF0**2)
-            validActInner = r > (
-                telescope.centralObstruction*self.D/2-0.5*self.pitch)
-            validActOuter = r <= (self.D/2+0.7533*self.pitch)
+                # select valid actuators (central and outer obstruction)
+                r = np.sqrt(self.xIF0**2 + self.yIF0**2)
+                validActInner = r > (
+                    telescope.centralObstruction*self.D/2-0.5*self.pitch)
+                validActOuter = r <= (self.D/2+0.7533*self.pitch)
 
-            self.validAct = validActInner*validActOuter
+                self.validAct = validActInner*validActOuter
             self.nValidAct = sum(self.validAct)
 
         # If the coordinates are specified
@@ -444,20 +457,21 @@ class DeformableMirror:
                 layer.center_y.append(center_y)
 
         return layer
+    
+    def set_pupil_footprint(self,src):
+                [x_z, y_z] = pol2cart(self.altitude_layer.altitude*xp.tan((src.coordinates[0]/self.rad2arcsec))
+                                      * self.altitude_layer.resolution / self.altitude_layer.D, xp.deg2rad(src.coordinates[1]))
+                self.altitude_layer.extra_sx = int(x_z)-x_z
+                self.altitude_layer.extra_sy = int(y_z)-y_z
 
-    def set_pupil_footprint(self, src):
-        [x_z, y_z] = pol2cart(self.altitude_layer.altitude*xp.tan((src.coordinates[0]/self.rad2arcsec))
-                              * self.altitude_layer.resolution / self.altitude_layer.D, xp.deg2rad(src.coordinates[1]))
-        self.altitude_layer.extra_sx = int(x_z)-x_z
-        self.altitude_layer.extra_sy = int(y_z)-y_z
+                center_x = int(y_z)+self.altitude_layer.resolution//2
+                center_y = int(x_z)+self.altitude_layer.resolution//2
 
-        center_x = int(y_z)+self.altitude_layer.resolution//2
-        center_y = int(x_z)+self.altitude_layer.resolution//2
+                self.altitude_layer.pupil_footprint = xp.zeros(
+                    [self.altitude_layer.resolution, self.altitude_layer.resolution], dtype=self.precision())
+                self.altitude_layer.pupil_footprint[center_x-self.telescope.resolution//2:center_x+self.telescope.resolution //
+                                      2, center_y-self.telescope.resolution//2:center_y+self.telescope.resolution//2] = 1
 
-        self.altitude_layer.pupil_footprint = xp.zeros(
-            [self.altitude_layer.resolution, self.altitude_layer.resolution], dtype=self.precision())
-        self.altitude_layer.pupil_footprint[center_x-self.telescope.resolution//2:center_x+self.telescope.resolution //
-                                            2, center_y-self.telescope.resolution//2:center_y+self.telescope.resolution//2] = 1
 
     def get_OPD_altitude(self, i_source):
         self.set_pupil_footprint(self.telescope.src.src[i_source])
@@ -473,14 +487,19 @@ class DeformableMirror:
                 sub_im = np.atleast_3d(OPD)
             else:
                 sub_im = np.moveaxis(OPD, 2, 0)
-            h = self.telescope.src.altitude[i_source] - self.altitude_layer.altitude
+
+            alpha_cone = np.arctan(
+                self.telescope.D/2/self.telescope.src.altitude[i_source])
+            h = self.telescope.src.altitude[i_source] - \
+                self.altitude_layer.altitude
             if np.isinf(h):
-                magnification_cone_effect = 1
+                r = self.telescope.D/2
             else:
-                magnification_cone_effect = h/self.telescope.src.altitude
+                r = h*np.tan(alpha_cone)
+            ratio = self.telescope.D/r/2
             cube_in = sub_im.T
-            pixel_size_in = 1
-            pixel_size_out = pixel_size_in*magnification_cone_effect
+            pixel_size_in = self.altitude_layer.D/self.altitude_layer.resolution
+            pixel_size_out = pixel_size_in/ratio
             resolution_out = self.telescope.resolution
 
             OPD = np.asarray(np.squeeze(interpolate_cube(
@@ -493,29 +512,27 @@ class DeformableMirror:
             self.coefs = self.coefs
         if OPD_in is None:
             OPD_in = telescope.OPD_no_pupil
-        if np.ndim(OPD_in) == 3:
-            telescope.resetOPD()
-            OPD_in = telescope.OPD_no_pupil
-            warning('Multiple wave-front were already propagated at the telescope level. The telescope OPD is reset to a single flat wave-front.')
+
         if i_source is not None:
             dm_OPD = self.get_OPD_altitude(i_source)
         else:
             dm_OPD = self.OPD
+
         # case where the telescope is paired to an atmosphere
-        # if telescope.isPaired:
-        if telescope.isPetalFree:
-            telescope.removePetalling()
-        # case with single OPD
-        if np.ndim(self.OPD) == 2:
-            OPD_out_no_pupil = OPD_in + dm_OPD
-        # case with multiple OPD
-        if np.ndim(self.OPD) == 3:
-            OPD_out_no_pupil = np.tile(
-                OPD_in[..., None], (1, 1, self.OPD.shape[2]))+dm_OPD
+        if telescope.isPaired:
+            if telescope.isPetalFree:
+                telescope.removePetalling()
+            # case with single OPD
+            if np.ndim(self.OPD) == 2:
+                OPD_out_no_pupil = OPD_in + dm_OPD
+            # case with multiple OPD
+            else:
+                OPD_out_no_pupil = np.tile(
+                    OPD_in[..., None], (1, 1, self.OPD.shape[2]))+dm_OPD
 
         # case where the telescope is separated from a telescope object
-        # else:
-            # OPD_out_no_pupil = dm_OPD
+        else:
+            OPD_out_no_pupil = dm_OPD
 
         return OPD_out_no_pupil
 
